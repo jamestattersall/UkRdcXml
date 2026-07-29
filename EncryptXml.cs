@@ -99,6 +99,10 @@ namespace UKRDC
                 using StreamWriter writer = new StreamWriter(pipeWriterStream, Encoding.UTF8, bufferSize: 4096, leaveOpen: true);
                 using XmlWriter xmlWriter = XmlWriter.Create(writer, _xmlWriterSettings);
 
+                //these nodes are required in each XML file for UKRDC, so we will add them to the root element of the database XML
+                var addNodes = $@"
+<SendingFacility channelName=""{Version}"" time=""{_strPrepared}"" schemaVersion=""4.2.0"">{_sendingFacilityCode}</SendingFacility>
+<SendingExtract>UKRDC</SendingExtract>";
 
                 bool isRoot = true;
                 while (await xmlReader.ReadAsync())
@@ -107,26 +111,22 @@ namespace UKRDC
                     {
                         case XmlNodeType.Element:
                             if (isRoot)
-                            {//Intercept the database root element                            
+                            {//Intercept the database root element
                                 string rootLocalName = xmlReader.LocalName;
 
-                                //decorate root element with prefixes and attributes required for UKRDC
+                                //add namespace required for UKRDC
                                 await xmlWriter.WriteStartElementAsync("ns0", rootLocalName, "http://www.rixg.org.uk");
-                                await xmlWriter.WriteAttributeStringAsync("xmlns", "xsd", null, "http://www.w3.org/2001/XMLSchema");                        // 3. Copy any existing attributes from the database root
-                                await xmlWriter.WriteAttributeStringAsync("xmlns", "xsi", null, "http://www.w3.org/2001/XMLSchema-instance");
-                                await xmlWriter.WriteStartElementAsync(null, "SendingFacility", null);
-                                await xmlWriter.WriteAttributeStringAsync(null, "channelName", null, Version);
-                                await xmlWriter.WriteAttributeStringAsync(null, "time", null, _strPrepared);
-                                await xmlWriter.WriteAttributeStringAsync(null, "schemaVersion", null, "4.2.0");
-                                await xmlWriter.WriteStringAsync(_sendingFacilityCode);
-                                await xmlWriter.WriteEndElementAsync();
-                                await xmlWriter.WriteElementStringAsync(null, "SendingExtract", null, "UKRDC");
-
+                                //add additional attributes if required for UKRDC
+                                //await xmlWriter.WriteAttributeStringAsync("xmlns", "xsd", null, "http://www.w3.org/2001/XMLSchema");                        // 3. Copy any existing attributes from the database root
+                                //await xmlWriter.WriteAttributeStringAsync("xmlns", "xsi", null, "http://www.w3.org/2001/XMLSchema-instance");
+                                //add additional nodes required for UKRDC
+                                await xmlWriter.WriteRawAsync(addNodes);
                                 isRoot = false;
                             }
                             else
                             { // Pass-through child elements as they are
-                                await xmlWriter.WriteStartElementAsync(xmlReader.Prefix, xmlReader.LocalName, xmlReader.NamespaceURI);
+                               await xmlWriter.WriteStartElementAsync(xmlReader.Prefix, xmlReader.LocalName, xmlReader.NamespaceURI);
+                                
                             }
                             if (xmlReader.HasAttributes)
                             {
