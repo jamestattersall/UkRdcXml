@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "TestEncryptedXml": {
+      "commandName": "Project",
+      "commandLineArgs": "sfid=1"
+    }
+  }
+}
