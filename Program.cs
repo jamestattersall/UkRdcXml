@@ -7,6 +7,8 @@ using System.Net;
 using System.Text.Json;
 using UKRDC;
 
+const int TIMEOUT_MS = 60000;
+
 var currentSettings = new AppSettings().Get(args);
 
 var cb = new SqlConnectionStringBuilder()
@@ -26,6 +28,18 @@ int sendingFacilityId = currentSettings.SFID;
 
 using SqlConnection connection = new SqlConnection(cb.ConnectionString);
 
+try
+{
+    await connection.OpenAsync();
+}
+catch (Exception e)
+{
+    Console.WriteLine("Invalid connection string, can't connect to database");
+    Console.WriteLine(e.Message);
+    Thread.Sleep(TIMEOUT_MS);
+    return;
+}
+
 // Query data with Dapper
 var pats = await connection.QueryAsync<Patient>($"SELECT * FROM dbo.PatientsToExport({sendingFacilityId})");
 var subm = await connection.QuerySingleOrDefaultAsync<Submission>($"SELECT top 1 * FROM dbo.Submissions WHERE SendingFacilityId={sendingFacilityId} ORDER BY Id desc");
@@ -34,7 +48,7 @@ var sf = await connection.QuerySingleOrDefaultAsync<SendingFaciliy>($"SELECT TOP
 if (sf is null)
 {
     Console.WriteLine($"No facility has id = {sendingFacilityId}");
-    Thread.Sleep(5000);
+    Thread.Sleep(TIMEOUT_MS);
     return;
 }
 
@@ -43,7 +57,7 @@ Console.WriteLine($"Exporting XML for {sf.Name}");
 if (n == 0)
 {
     Console.WriteLine($"No data to export");
-    Thread.Sleep(5000);
+    Thread.Sleep(TIMEOUT_MS);
     return;
 }
 
@@ -53,34 +67,38 @@ command.Parameters.Add(currentSettings.PatientIdParameter, SqlDbType.Int);
 command.Parameters.AddWithValue(currentSettings.StartParameter, subm.Start);
 command.Parameters.AddWithValue(currentSettings.EndParameter, subm.Stop);
 
+
 try
 {
-    await connection.OpenAsync();
-} catch(Exception e)
+    using EncryptXml x = new(command, sf.Code, subm.PopulatedTables, publicKeyPath, outputPath, subm.Id);
+
+    var prog = new ConsoleUtilities.Progress(20);
+    prog.WriteProgressBar(0);
+    float i = 0;
+    foreach (Patient p in pats)
+    {
+        i++;
+        prog.WriteProgressBar(i / (float)n);
+        await x.ExportPgpXmlAsync(p.PatientId, p.NhsNumber);
+    }
+    Console.WriteLine();
+    Console.WriteLine($"Exported {n} XML files.");
+}
+catch (Exception e)
 {
-     Thread.Sleep(5000);
-    throw new Exception("Invalid connection string, cannot connect to database",e);
+    Console.WriteLine($"Error from EncryptXml object: {e.Message}");
+    Thread.Sleep(TIMEOUT_MS);
+    return;
 }
 
-using EncryptXml x = new(command, sf.Code, subm.PopulatedTables, publicKeyPath, outputPath, subm.Id);
-
-var prog = new ConsoleUtilities.Progress(20);
-prog.WriteProgressBar(0);
-float i = 0;
-foreach (Patient p in pats)
-{
-    i++;
-    prog.WriteProgressBar(i / (float)n);
-    await x.ExportPgpXmlAsync(p.PatientId, p.NhsNumber);
-}
-Console.WriteLine();
-Console.WriteLine($"Exported {n} XML files.");
-
-subm.GeneratedXml = DateTime.Now;
-subm.NPatients = n;
 
 //update to database using dapper.contrib.extensions
+subm.GeneratedXml = DateTime.Now;
+subm.NPatients = n;
 connection.Update(subm);
+
+Thread.Sleep(TIMEOUT_MS);
+return;
 
 class Patient
 {
