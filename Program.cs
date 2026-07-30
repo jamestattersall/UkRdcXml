@@ -34,6 +34,7 @@ var sf = await connection.QuerySingleOrDefaultAsync<SendingFaciliy>($"SELECT TOP
 if (sf is null)
 {
     Console.WriteLine($"No facility has id = {sendingFacilityId}");
+    Thread.Sleep(5000);
     return;
 }
 
@@ -42,6 +43,7 @@ Console.WriteLine($"Exporting XML for {sf.Name}");
 if (n == 0)
 {
     Console.WriteLine($"No data to export");
+    Thread.Sleep(5000);
     return;
 }
 
@@ -56,6 +58,7 @@ try
     await connection.OpenAsync();
 } catch(Exception e)
 {
+     Thread.Sleep(5000);
     throw new Exception("Invalid connection string, cannot connect to database",e);
 }
 
@@ -108,8 +111,8 @@ public class AppSettings
     public string Server { get; set; } = "(local)";
     public string Database { get; set; } = "UKRDC";
     public string XmlQuery { get; set; } = "SELECT dbo.GenerateXmlV2(@sendingFacilityId,@patientId,@start,@end)";
-    public string PublicKeyFile { get; set; } = "C:\\Users\\james\\OneDrive\\Documents\\JET_public.asc";
-    public string OutputFileDirectory { get; set; } = "C:\\Users\\james\\Downloads\\XML";
+    public string PublicKeyFile { get; set; } = "[path to the UKRR public key file]";
+    public string OutputFileDirectory { get; set; } = "[path to your output directory]";
     public string PatientIdParameter { get; set; } = "@patientId";
     public string SendingFacilityIdParameter { get; set; } = "@sendingFacilityId";
     public string StartParameter { get; set; } = "@start";
