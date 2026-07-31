@@ -2,6 +2,7 @@
 using PgpCore;
 using System.IO.Pipelines;
 using System.Reflection;
+using System.Security.Cryptography.Pkcs;
 using System.Text;
 using System.Xml;
 
@@ -68,13 +69,13 @@ namespace UKRDC
         private readonly string _patientParameterName;
         private readonly XmlWriterSettings _xmlWriterSettings;
 
-        public async Task ExportPgpXmlAsync(int patientId, string NhsNunber)
+        public async Task ExportPgpXmlAsync(int patientId, string identifier)
         {
             Pipe pipe = new Pipe();
             Stream pipeReaderStream = pipe.Reader.AsStream();
             Stream pipeWriterStream = pipe.Writer.AsStream();
 
-            string filename = Path.Combine(_outputPath, $"{_fileNameStart}_{NhsNunber}.{_outputFileExtension}");
+            string filename = Path.Combine(_outputPath, $"{_fileNameStart}_{identifier}.{_outputFileExtension}");
             
             using FileStream targetFileStream = new FileStream(
                 filename,
@@ -84,11 +85,8 @@ namespace UKRDC
                 bufferSize: 4096,
                 useAsync: true);
 
-            // Start the PGP encryption engine processing the stream in the background
-            // It reads from the Pipe's Reader and pushes encrypted data straight onto the Disk File
-            Task encryptionTask = _pgp.EncryptStreamAsync(pipeReaderStream, targetFileStream);
+               Task encryptionTask = _pgp.EncryptStreamAsync(pipeReaderStream, targetFileStream);
 
-            // generate XML chunks directly into the Pipe's Writer
             try
             {
                 _command.Parameters[_patientParameterName].Value = patientId;
@@ -100,9 +98,7 @@ namespace UKRDC
                 using XmlWriter xmlWriter = XmlWriter.Create(writer, _xmlWriterSettings);
 
                 //these nodes are required in each XML file for UKRDC, so we will add them to the root element of the database XML
-                var addNodes = $@"
-<SendingFacility channelName=""{Version}"" time=""{_strPrepared}"" schemaVersion=""4.2.0"">{_sendingFacilityCode}</SendingFacility>
-<SendingExtract>UKRDC</SendingExtract>";
+                var nodesToAdd = $@"<SendingFacility channelName=""{Version}"" time=""{_strPrepared}"" schemaVersion=""4.2.0"">{_sendingFacilityCode}</SendingFacility><SendingExtract>UKRDC</SendingExtract>";
 
                 bool isRoot = true;
                 while (await xmlReader.ReadAsync())
@@ -117,24 +113,20 @@ namespace UKRDC
                                 //add namespace required for UKRDC
                                 await xmlWriter.WriteStartElementAsync("ns0", rootLocalName, "http://www.rixg.org.uk");
                                 //add additional attributes if required for UKRDC
+                                //uncomment if needed
                                 //await xmlWriter.WriteAttributeStringAsync("xmlns", "xsd", null, "http://www.w3.org/2001/XMLSchema");                        // 3. Copy any existing attributes from the database root
                                 //await xmlWriter.WriteAttributeStringAsync("xmlns", "xsi", null, "http://www.w3.org/2001/XMLSchema-instance");
+
+                                AddAttributesFromreader(xmlReader, xmlWriter);
+
                                 //add additional nodes required for UKRDC
-                                await xmlWriter.WriteRawAsync(addNodes);
+                                await xmlWriter.WriteRawAsync(nodesToAdd);
                                 isRoot = false;
                             }
                             else
                             { // Pass-through child elements as they are
                                await xmlWriter.WriteStartElementAsync(xmlReader.Prefix, xmlReader.LocalName, xmlReader.NamespaceURI);
-                                
-                            }
-                            if (xmlReader.HasAttributes)
-                            {
-                                while (xmlReader.MoveToNextAttribute())
-                                {
-                                    await xmlWriter.WriteAttributeStringAsync(xmlReader.Prefix, xmlReader.LocalName, xmlReader.NamespaceURI, xmlReader.Value);
-                                }
-                                xmlReader.MoveToElement();
+                               AddAttributesFromreader(xmlReader, xmlWriter);
                             }
                             if (xmlReader.IsEmptyElement)
                             {
@@ -169,6 +161,18 @@ namespace UKRDC
             }
 
             await encryptionTask;
+        }
+
+        private void AddAttributesFromreader(XmlReader reader, XmlWriter writer)
+        {
+            if (reader.HasAttributes)
+            {
+                while (reader.MoveToNextAttribute())
+                {
+                    writer.WriteAttributeString(reader.Prefix, reader.LocalName, reader.NamespaceURI, reader.Value);
+                }
+                reader.MoveToElement();
+            }
         }
 
         public void Dispose()

@@ -79,7 +79,7 @@ try
     {
         i++;
         prog.WriteProgressBar(i / (float)n);
-        await x.ExportPgpXmlAsync(p.PatientId, p.NhsNumber);
+        await x.ExportPgpXmlAsync(p.PatientId, p.Identifier);
     }
     Console.WriteLine();
     Console.WriteLine($"Exported {n} XML files.");
@@ -103,7 +103,8 @@ return;
 class Patient
 {
     public int PatientId = 0;
-    public string NhsNumber = "";
+
+    public string Identifier = "";
 }
 
 public class SendingFaciliy

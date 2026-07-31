@@ -23,7 +23,7 @@ It requires access to a database with the following entry points
 
   - table dbo.SendingFacilities(Id smallint PRIMARY KEY, Name varchar(255) NOT NULL, Code varchar(255) NOT NULL)
 
-  - table-valued function dbo.PatientsToExport(@sendingFacilityId) returning list of patients to export (Id int, NhsNumber char(10))
+  - table-valued function dbo.PatientsToExport(@sendingFacilityId) returning list of patients to export (Id int, Identifier char(10))
 
 
 
