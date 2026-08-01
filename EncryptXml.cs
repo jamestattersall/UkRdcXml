@@ -6,7 +6,7 @@ using System.Security.Cryptography.Pkcs;
 using System.Text;
 using System.Xml;
 
-namespace UKRDC
+namespace UkrdcPgpXml
 {
     internal class EncryptXml : IDisposable
     {
@@ -18,15 +18,13 @@ namespace UKRDC
         {
             var nm = Assembly.GetExecutingAssembly().GetName();
 
-            Version = $"{nm.Name} {nm.Version}";
             _strPrepared = whenPrepared.ToString("s");
-            // 1. Setup PGP Configurations
             _command = xmlCommand;
             _sendingFacilityCode = sendingFaciltyCode;
-            _fileNameStart = $"{sendingFaciltyCode}_{batch.ToString("000000")}_";
+            _fileNameStart = $"{sendingFaciltyCode}_{batch:000000}_";
             _patientParameterName= patientParameterName;
             _outputFileExtension = outputFileExtension;
-
+            _nodesToAdd = $@"<SendingFacility channelName=""{nm.Name} {nm.Version}"" time=""{_strPrepared}"" schemaVersion=""4.2.0"">{_sendingFacilityCode}</SendingFacility><SendingExtract>UKRDC</SendingExtract>";
             _xmlWriterSettings = new XmlWriterSettings
             {
                 Async = true,
@@ -58,7 +56,6 @@ namespace UKRDC
                 throw (new FileNotFoundException($"Directory for encrypted files {outputPath} not found"));
             }
         }
-        public string Version { get; init; }
         private readonly string _strPrepared;
         private readonly PGP _pgp;
         private readonly SqlCommand _command;
@@ -67,17 +64,18 @@ namespace UKRDC
         private readonly string _fileNameStart;
         private readonly string _sendingFacilityCode;
         private readonly string _patientParameterName;
+        private readonly string _nodesToAdd;
         private readonly XmlWriterSettings _xmlWriterSettings;
 
         public async Task ExportPgpXmlAsync(int patientId, string identifier)
         {
-            Pipe pipe = new Pipe();
+            Pipe pipe = new();
             Stream pipeReaderStream = pipe.Reader.AsStream();
             Stream pipeWriterStream = pipe.Writer.AsStream();
 
             string filename = Path.Combine(_outputPath, $"{_fileNameStart}_{identifier}.{_outputFileExtension}");
             
-            using FileStream targetFileStream = new FileStream(
+            using FileStream targetFileStream = new(
                 filename,
                 FileMode.Create,
                 FileAccess.Write,
@@ -94,11 +92,8 @@ namespace UKRDC
 
 
                 // Writer feeds directly into the pipeWriterStream
-                using StreamWriter writer = new StreamWriter(pipeWriterStream, Encoding.UTF8, bufferSize: 4096, leaveOpen: true);
+                using StreamWriter writer = new(pipeWriterStream, Encoding.UTF8, bufferSize: 4096, leaveOpen: true);
                 using XmlWriter xmlWriter = XmlWriter.Create(writer, _xmlWriterSettings);
-
-                //these nodes are required in each XML file for UKRDC, so we will add them to the root element of the database XML
-                var nodesToAdd = $@"<SendingFacility channelName=""{Version}"" time=""{_strPrepared}"" schemaVersion=""4.2.0"">{_sendingFacilityCode}</SendingFacility><SendingExtract>UKRDC</SendingExtract>";
 
                 bool isRoot = true;
                 while (await xmlReader.ReadAsync())
@@ -120,7 +115,7 @@ namespace UKRDC
                                 AddAttributesFromreader(xmlReader, xmlWriter);
 
                                 //add additional nodes required for UKRDC
-                                await xmlWriter.WriteRawAsync(nodesToAdd);
+                                await xmlWriter.WriteRawAsync(_nodesToAdd);
                                 isRoot = false;
                             }
                             else
@@ -163,7 +158,7 @@ namespace UKRDC
             await encryptionTask;
         }
 
-        private void AddAttributesFromreader(XmlReader reader, XmlWriter writer)
+        private static void AddAttributesFromreader(XmlReader reader, XmlWriter writer)
         {
             if (reader.HasAttributes)
             {
