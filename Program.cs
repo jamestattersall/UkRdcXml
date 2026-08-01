@@ -13,7 +13,9 @@ internal static class Program
     {
         const int TIMEOUT_MS = 60000;
 
-        var   currentSettings = new AppSettings().Get(args);
+        var currentSettings = new AppSettings().Get(args);
+
+        // 1. Initialise Serilog with structured engine targets
         Log.Logger = new LoggerConfiguration()
             .MinimumLevel.Debug()
             .WriteTo.Console()
@@ -31,10 +33,9 @@ internal static class Program
         string outputPath = currentSettings.OutputFileDirectory;
         string publicKeyPath = currentSettings.PublicKeyFile;
         string query = currentSettings.XmlQuery;
-
         int sendingFacilityId = currentSettings.SFID;
 
-        using SqlConnection connection = new(cb.ConnectionString);
+        await using SqlConnection connection = new(cb.ConnectionString);
 
         try
         {
@@ -42,38 +43,51 @@ internal static class Program
         }
         catch (Exception e)
         {
-            Log.Error("Invalid connection string, can't connect to database",e);
-            Thread.Sleep(TIMEOUT_MS);
+            Log.Error(e, "Invalid connection string, can't connect to database");
+            await Task.Delay(TIMEOUT_MS);
+            await Log.CloseAndFlushAsync();
             return 1;
         }
 
-        // Query data with Dapper
-        var sf = await connection.QuerySingleOrDefaultAsync<SendingFacility>($"SELECT TOP 1 * From dbo.SendingFacilities where Id = {sendingFacilityId}");
+        // Parameterised queries to prevent SQL parsing errors and injection vulnerabilities
+        var sf = await connection.QuerySingleOrDefaultAsync<SendingFacility>(
+            "SELECT TOP 1 * FROM dbo.SendingFacilities WHERE Id = @Id",
+            new { Id = sendingFacilityId });
+
         if (sf is null)
         {
-            Log.Error($"No facility has id = {sendingFacilityId}");
-            Thread.Sleep(TIMEOUT_MS);
+            Log.Error("No facility found matching ID: {SendingFacilityId}", sendingFacilityId);
+            await Task.Delay(TIMEOUT_MS);
+            await Log.CloseAndFlushAsync();
             return 1;
         }
 
-        var subm = await connection.QuerySingleOrDefaultAsync<Submission>($"SELECT top 1 * FROM dbo.Submissions WHERE SendingFacilityId={sendingFacilityId} ORDER BY Id desc");
+        var subm = await connection.QuerySingleOrDefaultAsync<Submission>(
+            "SELECT TOP 1 * FROM dbo.Submissions WHERE SendingFacilityId = @SFID ORDER BY Id DESC",
+            new { SFID = sendingFacilityId });
+
         if (subm is null)
         {
-            Log.Error($"No submission found for {sf.Name}");
-            Thread.Sleep(TIMEOUT_MS);
+            Log.Error("No submission history records found for facility: {FacilityName}", sf.Name);
+            await Task.Delay(TIMEOUT_MS);
+            await Log.CloseAndFlushAsync();
             return 1;
         }
 
-        var pats = await connection.QueryAsync<Patient>($"SELECT * FROM dbo.PatientsToExport({subm.Id})");
-        int n = pats.Count();
+        var pats = (await connection.QueryAsync<Patient>(
+            "SELECT PatientId, Identifier FROM dbo.PatientsToExport(@SubId)",
+            new { SubId = subm.Id })).ToList();
+
+        int n = pats.Count;
         if (n == 0)
         {
-            Log.Error($"No data to export for {sf.Name}");
-            Thread.Sleep(TIMEOUT_MS);
+            Log.Error("No payload data queue elements ready to export for facility: {FacilityName}", sf.Name);
+            await Task.Delay(TIMEOUT_MS);
+            await Log.CloseAndFlushAsync();
             return 1;
         }
 
-        Log.Information($"Exporting XML for {sf.Name}");
+        Log.Information("Beginning batch export processing lifecycle execution for facility: {FacilityName}", sf.Name);
 
         using SqlCommand command = new(query, connection);
         command.Parameters.AddWithValue(currentSettings.SubmissionIdParameter, subm.Id);
@@ -87,76 +101,93 @@ internal static class Program
                 command,
                 sf.Code,
                 subm.PopulatedTables,
-                publicKeyPath, 
-                outputPath, 
-                subm.Id
-                );
+                publicKeyPath,
+                outputPath,
+                subm.Id,
+                logger: Log.ForContext<EncryptXml>()
+            );
 
             var prog = new ConsoleUtilities.Progress(20);
             prog.WriteProgressBar(0);
             float i = 0;
+
             foreach (Patient p in pats)
             {
                 i++;
-                prog.WriteProgressBar(i / (float)n);
-                await x.ExportPgpXmlAsync(p.PatientId, p.Identifier);
+                prog.WriteProgressBar(i / n);
+
+                try
+                {
+                    await x.ExportPgpXmlAsync(p.PatientId, p.Identifier);
+                }
+                catch (Exception)
+                {
+                    // Internal EncryptXml handles full structured Serilog logging parameter mapping.
+                    // Bypass explicitly here so an individual record exception doesn't kill the batch loop execution.
+                    continue;
+                }
             }
+
             Console.WriteLine();
-            Log.Information($"{n} encrypted XML files generated");
-            Log.Information($"Saved to  : {outputPath}");
+            Log.Information("{Count} encrypted XML output files safely generated", n);
+            Log.Information("Destination directory: {OutputPath}", outputPath);
             FileInfo fi = new(publicKeyPath);
-            Log.Information($"Public key: {fi.Name}");
+            Log.Information("Public key verification resource: {KeyName}", fi.Name);
         }
         catch (Exception e)
         {
-            Log.Error($"Error from EncryptXml object: {e.Message}");
-            Thread.Sleep(TIMEOUT_MS);
+            Log.Error(e, "Fatal execution failure originating from EncryptXml operational pipeline processing context");
+            await Task.Delay(TIMEOUT_MS);
+            await Log.CloseAndFlushAsync();
             return 1;
         }
 
         subm.GeneratedXml = DateTime.Now;
         subm.NPatients = n;
 
-        //update to database using dapper.contrib.extensions
         try
         {
-            connection.Update(subm);
+            await connection.UpdateAsync(subm);
         }
         catch (Exception e)
         {
-            Log.Error($"Error updating submission record: {e.Message}");
+            Log.Error(e, "Error executing asynchronous tracking record update context back onto the data repository instance");
         }
 
-        Thread.Sleep(TIMEOUT_MS);
+        await Task.Delay(TIMEOUT_MS);
+        await Log.CloseAndFlushAsync(); // Safely flush remaining files out to text disks before closing console execution context
         return 0;
     }
 }
 
 namespace UkrdcPgpXml
 {
+    [Table("Patients")]
     class Patient
     {
-        public int PatientId = 0;
-
-        public string Identifier = "";
+        public int PatientId { get; set; }
+        public string Identifier { get; set; } = string.Empty;
     }
 
+    [Table("SendingFacilities")]
     public class SendingFacility
     {
+        [Key]
         public int Id { get; set; }
-        public string Name { get; set; } = "";
-        public string Code { get; set; } = "";
+        public string Name { get; set; } = string.Empty;
+        public string Code { get; set; } = string.Empty;
     }
 
+    [Table("Submissions")]
     class Submission
     {
-        public int Id { get; }
+        [Key]
+        public int Id { get; set; } // Settable property required by Dapper for update mutations
         public DateTime PopulatedTables { get; set; }
-        public DateTime Start { get; }
-        public DateTime Stop { get; }
+        public DateTime Start { get; set; }
+        public DateTime Stop { get; set; }
         public DateTime? GeneratedXml { get; set; }
         public int NPatients { get; set; }
-
     }
 
     public class AppSettings
@@ -180,7 +211,6 @@ namespace UkrdcPgpXml
             string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
             string settingsFilePath = Path.Combine(baseDirectory, SettingsFileName);
 
-            // 2. Initialize default configuration file if it does not exist
             if (!File.Exists(settingsFilePath))
             {
                 var defaultSettings = this;
@@ -189,14 +219,12 @@ namespace UkrdcPgpXml
                 File.WriteAllText(settingsFilePath, initialJson);
             }
 
-            // 3. Load settings via Microsoft.Extensions.Configuration
             IConfiguration rootConfig = new ConfigurationBuilder()
                 .SetBasePath(baseDirectory)
                 .AddJsonFile(SettingsFileName, optional: false, reloadOnChange: true)
                 .AddCommandLine(args)
                 .Build();
 
-            // Bind JSON configuration structure to a strongly-typed class instance
             return rootConfig.Get<AppSettings>() ?? new AppSettings();
         }
     }

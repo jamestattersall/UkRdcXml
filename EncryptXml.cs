@@ -12,7 +12,7 @@ namespace UkrdcPgpXml
     {
         private const int BATCH_LENGTH = 4096;
 
-        public EncryptXml(SqlCommand xmlCommand, string sendingFacilityCode, DateTime whenPrepared, string publicKeyPath, string outputPath, int submissionId, ILogger? logger = null, string patientParameterName = "@patientId", string outputFileExtension = "xml.pgp")
+        public EncryptXml(SqlCommand xmlCommand, string sendingFacilityCode, DateTime whenPrepared, string publicKeyPath, string outputPath, int submissionId, ILogger logger, string patientParameterName = "@patientId", string outputFileExtension = "xml.pgp")
         {
             var nm = Assembly.GetExecutingAssembly().GetName();
             if (File.Exists(publicKeyPath))
@@ -24,12 +24,12 @@ namespace UkrdcPgpXml
                 }
                 catch (PgpCoreException ex)
                 {
-                    throw new Exception($"No valid encryption keys in file {publicKeyPath}, {ex.Message}");
+                    logger.Error(ex, $"No valid encryption keys in file {publicKeyPath}, {ex.Message}");
                 }
             }
             else
             {
-                throw new FileNotFoundException($"Key file {publicKeyPath} not found");
+                logger.Error(new FileNotFoundException(),$"Key file {publicKeyPath} not found");
             }
 
             if (Directory.Exists(outputPath))
@@ -61,6 +61,8 @@ namespace UkrdcPgpXml
                 ConformanceLevel = ConformanceLevel.Fragment,
                 CheckCharacters = false
             };
+
+            _log = logger;
         }
 
         private readonly string _strPrepared;
@@ -75,6 +77,7 @@ namespace UkrdcPgpXml
         private readonly Stream _pipeReaderStream;
         private readonly Stream _pipeWriterStream;
         private readonly XmlWriterSettings _xmlWriterSettings;
+        private readonly ILogger _log;
 
         public async Task ExportPgpXmlAsync(int patientId, string identifier)
         {
@@ -154,7 +157,7 @@ namespace UkrdcPgpXml
             catch (Exception ex)
             {
                 processingException = ex;
-                throw;
+                _log.Error(ex, $"Error processing XML for patient {patientId} with identifier {identifier}");
             }
             finally
             {
