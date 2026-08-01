@@ -5,115 +5,132 @@ using Microsoft.Extensions.Configuration;
 using System.Data;
 using System.Text.Json;
 using UkrdcPgpXml;
+using Serilog;
 
-
-const int TIMEOUT_MS = 60000;
-
-var   currentSettings = new AppSettings().Get(args);
-
-var cb = new SqlConnectionStringBuilder()
+internal static class Program
 {
-    DataSource = currentSettings.Server,
-    InitialCatalog = currentSettings.Database,
-    IntegratedSecurity = true,
-    TrustServerCertificate = true,
-};
-
-string outputPath = currentSettings.OutputFileDirectory;
-string publicKeyPath = currentSettings.PublicKeyFile;
-string query = currentSettings.XmlQuery;
-
-int sendingFacilityId = currentSettings.SFID;
-
-using SqlConnection connection = new(cb.ConnectionString);
-
-try
-{
-    await connection.OpenAsync();
-}
-catch (Exception e)
-{
-    Console.WriteLine("Invalid connection string, can't connect to database");
-    Console.WriteLine(e.Message);
-    Thread.Sleep(TIMEOUT_MS);
-    return;
-}
-
-// Query data with Dapper
-var sf = await connection.QuerySingleOrDefaultAsync<SendingFacility>($"SELECT TOP 1 * From dbo.SendingFacilities where Id = {sendingFacilityId}");
-if (sf is null)
-{
-    Console.WriteLine($"No facility has id = {sendingFacilityId}");
-    Thread.Sleep(TIMEOUT_MS);
-    return;
-}
-
-var subm = await connection.QuerySingleOrDefaultAsync<Submission>($"SELECT top 1 * FROM dbo.Submissions WHERE SendingFacilityId={sendingFacilityId} ORDER BY Id desc");
-if (subm is null)
-{
-    Console.WriteLine($"No submission found for {sf.Name}");
-    Thread.Sleep(TIMEOUT_MS);
-    return;
-}
-
-var pats = await connection.QueryAsync<Patient>($"SELECT * FROM dbo.PatientsToExport({subm.Id})");
-int n = pats.Count();
-if (n == 0)
-{
-    Console.WriteLine($"No data to export for {sf.Name}");
-    Thread.Sleep(TIMEOUT_MS);
-    return;
-}
-
-Console.WriteLine($"Exporting XML for {sf.Name}");
-
-using SqlCommand command = new(query, connection);
-command.Parameters.AddWithValue(currentSettings.SubmissionIdParameter, subm.Id);
-command.Parameters.Add(currentSettings.PatientIdParameter, SqlDbType.Int);
-command.Parameters.AddWithValue(currentSettings.StartParameter, subm.Start);
-command.Parameters.AddWithValue(currentSettings.EndParameter, subm.Stop);
-
-try
-{
-    using EncryptXml x = new(command, sf.Code, subm.PopulatedTables, publicKeyPath, outputPath, subm.Id);
-
-    var prog = new ConsoleUtilities.Progress(20);
-    prog.WriteProgressBar(0);
-    float i = 0;
-    foreach (Patient p in pats)
+    public static async Task<int> Main(string[] args)
     {
-        i++;
-        prog.WriteProgressBar(i / (float)n);
-        await x.ExportPgpXmlAsync(p.PatientId, p.Identifier);
+        const int TIMEOUT_MS = 60000;
+
+        var   currentSettings = new AppSettings().Get(args);
+        Log.Logger = new LoggerConfiguration()
+            .MinimumLevel.Debug()
+            .WriteTo.Console()
+            .WriteTo.File(currentSettings.LogFile, rollingInterval: RollingInterval.Day)
+            .CreateLogger();
+
+        var cb = new SqlConnectionStringBuilder()
+        {
+            DataSource = currentSettings.Server,
+            InitialCatalog = currentSettings.Database,
+            IntegratedSecurity = true,
+            TrustServerCertificate = true,
+        };
+
+        string outputPath = currentSettings.OutputFileDirectory;
+        string publicKeyPath = currentSettings.PublicKeyFile;
+        string query = currentSettings.XmlQuery;
+
+        int sendingFacilityId = currentSettings.SFID;
+
+        using SqlConnection connection = new(cb.ConnectionString);
+
+        try
+        {
+            await connection.OpenAsync();
+        }
+        catch (Exception e)
+        {
+            Log.Error("Invalid connection string, can't connect to database",e);
+            Thread.Sleep(TIMEOUT_MS);
+            return 1;
+        }
+
+        // Query data with Dapper
+        var sf = await connection.QuerySingleOrDefaultAsync<SendingFacility>($"SELECT TOP 1 * From dbo.SendingFacilities where Id = {sendingFacilityId}");
+        if (sf is null)
+        {
+            Log.Error($"No facility has id = {sendingFacilityId}");
+            Thread.Sleep(TIMEOUT_MS);
+            return 1;
+        }
+
+        var subm = await connection.QuerySingleOrDefaultAsync<Submission>($"SELECT top 1 * FROM dbo.Submissions WHERE SendingFacilityId={sendingFacilityId} ORDER BY Id desc");
+        if (subm is null)
+        {
+            Log.Error($"No submission found for {sf.Name}");
+            Thread.Sleep(TIMEOUT_MS);
+            return 1;
+        }
+
+        var pats = await connection.QueryAsync<Patient>($"SELECT * FROM dbo.PatientsToExport({subm.Id})");
+        int n = pats.Count();
+        if (n == 0)
+        {
+            Log.Error($"No data to export for {sf.Name}");
+            Thread.Sleep(TIMEOUT_MS);
+            return 1;
+        }
+
+        Log.Information($"Exporting XML for {sf.Name}");
+
+        using SqlCommand command = new(query, connection);
+        command.Parameters.AddWithValue(currentSettings.SubmissionIdParameter, subm.Id);
+        command.Parameters.Add(currentSettings.PatientIdParameter, SqlDbType.Int);
+        command.Parameters.AddWithValue(currentSettings.StartParameter, subm.Start);
+        command.Parameters.AddWithValue(currentSettings.EndParameter, subm.Stop);
+
+        try
+        {
+            using EncryptXml x = new(
+                command,
+                sf.Code,
+                subm.PopulatedTables,
+                publicKeyPath, 
+                outputPath, 
+                subm.Id
+                );
+
+            var prog = new ConsoleUtilities.Progress(20);
+            prog.WriteProgressBar(0);
+            float i = 0;
+            foreach (Patient p in pats)
+            {
+                i++;
+                prog.WriteProgressBar(i / (float)n);
+                await x.ExportPgpXmlAsync(p.PatientId, p.Identifier);
+            }
+            Console.WriteLine();
+            Log.Information($"{n} encrypted XML files generated");
+            Log.Information($"Saved to  : {outputPath}");
+            FileInfo fi = new(publicKeyPath);
+            Log.Information($"Public key: {fi.Name}");
+        }
+        catch (Exception e)
+        {
+            Log.Error($"Error from EncryptXml object: {e.Message}");
+            Thread.Sleep(TIMEOUT_MS);
+            return 1;
+        }
+
+        subm.GeneratedXml = DateTime.Now;
+        subm.NPatients = n;
+
+        //update to database using dapper.contrib.extensions
+        try
+        {
+            connection.Update(subm);
+        }
+        catch (Exception e)
+        {
+            Log.Error($"Error updating submission record: {e.Message}");
+        }
+
+        Thread.Sleep(TIMEOUT_MS);
+        return 0;
     }
-    Console.WriteLine(); 
-    Console.WriteLine($"{n} encrypted XML files generated");
-    Console.WriteLine($"Saved to  : {outputPath}");
-    FileInfo fi = new(publicKeyPath);
-    Console.WriteLine($"Public key: {fi.Name}");
 }
-catch (Exception e)
-{
-    Console.WriteLine($"Error from EncryptXml object: {e.Message}");
-    Thread.Sleep(TIMEOUT_MS);
-    return;
-}
-
-subm.GeneratedXml = DateTime.Now;
-subm.NPatients = n;
-
-//update to database using dapper.contrib.extensions
-try
-{
-    connection.Update(subm);
-}
-catch (Exception e)
-{
-    Console.WriteLine($"Error updating submission record: {e.Message}");
-}
-
-Thread.Sleep(TIMEOUT_MS);
-return;
 
 namespace UkrdcPgpXml
 {
@@ -154,6 +171,7 @@ namespace UkrdcPgpXml
         public string StartParameter { get; set; } = "@start";
         public string EndParameter { get; set; } = "@end";
         public string OutputFileExtension { get; set; } = "xml.pgp";
+        public string LogFile { get; set; } = "[path to your log directory]";
         public int SFID { get; set; } = -1;
 
         public AppSettings Get(string[] args)
