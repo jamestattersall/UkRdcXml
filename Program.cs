@@ -2,10 +2,11 @@
 using Dapper.Contrib.Extensions;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
+using Serilog;
 using System.Data;
 using System.Text.Json;
 using UkrdcPgpXml;
-using Serilog;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 internal static class Program
 {
@@ -95,68 +96,95 @@ internal static class Program
         command.Parameters.AddWithValue(currentSettings.StartParameter, subm.Start);
         command.Parameters.AddWithValue(currentSettings.EndParameter, subm.Stop);
 
+        EncryptXml? x = null;
         try
         {
-            using EncryptXml x = new(
-                command,
-                sf.Code,
-                subm.PopulatedTables,
-                publicKeyPath,
-                outputPath,
-                subm.Id,
-                logger: Log.ForContext<EncryptXml>()
-            );
-
-            var prog = new ConsoleUtilities.Progress(20);
-            prog.WriteProgressBar(0);
-            float i = 0;
-
-            foreach (Patient p in pats)
-            {
-                i++;
-                prog.WriteProgressBar(i / n);
-
-                try
-                {
-                    await x.ExportPgpXmlAsync(p.PatientId, p.Identifier);
-                }
-                catch (Exception)
-                {
-                    // Internal EncryptXml handles full structured Serilog logging parameter mapping.
-                    // Bypass explicitly here so an individual record exception doesn't kill the batch loop execution.
-                    continue;
-                }
-            }
-
-            Console.WriteLine();
-            Log.Information("{Count} encrypted XML output files safely generated", n);
-            Log.Information("Destination directory: {OutputPath}", outputPath);
-            FileInfo fi = new(publicKeyPath);
-            Log.Information("Public key verification resource: {KeyName}", fi.Name);
+            x = new(
+               command,
+               sf.Code,
+               subm.PopulatedTables,
+               publicKeyPath,
+               outputPath,
+               subm.Id,
+               logger: Log.ForContext<EncryptXml>()
+           );
         }
-        catch (Exception e)
+        catch (Exception ex)
         {
-            Log.Error(e, "Fatal execution failure originating from EncryptXml operational pipeline processing context");
+            Log.Error(ex, "Error initializing EncryptXml");
+            await Task.Delay(TIMEOUT_MS);
+            await Log.CloseAndFlushAsync();
+            x = null;
+            return 1;
+        }
+
+        if (x == null)
+        {
+            Log.Error("EncryptXml initialization failed, exiting");
             await Task.Delay(TIMEOUT_MS);
             await Log.CloseAndFlushAsync();
             return 1;
         }
-
-        subm.GeneratedXml = DateTime.Now;
-        subm.NPatients = n;
-
-        try
+        else
         {
-            await connection.UpdateAsync(subm);
-        }
-        catch (Exception e)
-        {
-            Log.Error(e, "Error executing asynchronous tracking record update context back onto the data repository instance");
-        }
+            try
+            {
+                var prog = new ConsoleUtilities.Progress(20);
+                prog.WriteProgressBar(0);
+                float i = 0;
+                int errors = 0;
+                foreach (Patient p in pats)
+                {
+                    i++;
+                    prog.WriteProgressBar(i / n);
 
-        await Task.Delay(TIMEOUT_MS);
-        await Log.CloseAndFlushAsync(); // Safely flush remaining files out to text disks before closing console execution context
-        return 0;
+                    try
+                    {
+                        await x.ExportPgpXmlAsync(p.PatientId, p.Identifier);
+                    }
+                    catch (Exception)
+                    {
+                        errors++;
+                        // Internal EncryptXml handles full structured Serilog logging parameter mapping.
+                        // Bypass explicitly here so an individual record exception doesn't kill the batch loop execution.
+                        continue;
+                    }
+                }
+
+                Console.WriteLine();
+                Log.Information("{Count} files not processed due to errors", errors);
+                Log.Information("{Count} encrypted XML output files safely generated", n - errors);
+
+                Log.Information("Destination directory: {OutputPath}", outputPath);
+                FileInfo fi = new(publicKeyPath);
+                Log.Information("Public key verification resource: {KeyName}", fi.Name);
+            }
+            catch (Exception e)
+            {
+                Log.Error(e, "Error from EncryptXml:");
+                await Task.Delay(TIMEOUT_MS);
+                await Log.CloseAndFlushAsync();
+                return 1;
+            }
+
+            subm.GeneratedXml = DateTime.Now;
+            subm.NPatients = n;
+
+            try
+            {
+                await connection.UpdateAsync(subm);
+            }
+            catch (Exception e)
+            {
+                Log.Error(e, "Error updating submission record");
+            }
+
+            x?.Dispose();
+
+            await Task.Delay(TIMEOUT_MS);
+            await Log.CloseAndFlushAsync(); // Safely flush remaining files out to text disks before closing console execution context
+            return 0;
+        }
     }
 }
 

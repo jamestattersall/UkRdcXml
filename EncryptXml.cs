@@ -1,10 +1,12 @@
 ﻿using Microsoft.Data.SqlClient;
 using PgpCore;
+using Serilog;
+using System.Buffers;
 using System.IO.Pipelines;
 using System.Reflection;
 using System.Text;
 using System.Xml;
-using Serilog;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace UkrdcPgpXml
 {
@@ -25,11 +27,14 @@ namespace UkrdcPgpXml
                 catch (PgpCoreException ex)
                 {
                     logger.Error(ex, $"No valid encryption keys in file {publicKeyPath}, {ex.Message}");
+                   
                 }
             }
             else
             {
-                logger.Error(new FileNotFoundException(),$"Key file {publicKeyPath} not found");
+                FileNotFoundException ex = new();
+                logger.Error(ex, $"Key file {publicKeyPath} not found");
+                throw ex;
             }
 
             if (Directory.Exists(outputPath))
@@ -49,9 +54,7 @@ namespace UkrdcPgpXml
             _outputFileExtension = outputFileExtension;
             _nodesToAdd = $@"<SendingFacility channelName=""{nm.Name} {nm.Version}"" time=""{_strPrepared}"" schemaVersion=""4.2.0"">{sendingFacilityCode}</SendingFacility><SendingExtract>UKRDC</SendingExtract>";
 
-            _pipe = new Pipe();
-            _pipeReaderStream = _pipe.Reader.AsStream();
-            _pipeWriterStream = _pipe.Writer.AsStream(true);
+            // REMOVED class-level Pipe definitions from here
 
             _xmlWriterSettings = new XmlWriterSettings
             {
@@ -64,7 +67,12 @@ namespace UkrdcPgpXml
 
             _log = logger;
         }
-
+        private static readonly PipeOptions _pipeOptions = new(
+            pool: MemoryPool<byte>.Shared,          // Reuses memory blocks across iterations
+            pauseWriterThreshold: 65536,            // Pause writing if 64KB is unread
+            resumeWriterThreshold: 32768,           // Resume writing when unread drops to 32KB
+            useSynchronizationContext: false        // Prevents UI thread context switching overheads
+        );
         private readonly string _strPrepared;
         private readonly string _outputPath;
         private readonly string _outputFileExtension;
@@ -73,15 +81,20 @@ namespace UkrdcPgpXml
         private readonly PGP _pgp;
         private readonly SqlCommand _command;
         private readonly SqlParameter _patientParameter;
-        private readonly Pipe _pipe;
-        private readonly Stream _pipeReaderStream;
-        private readonly Stream _pipeWriterStream;
         private readonly XmlWriterSettings _xmlWriterSettings;
         private readonly ILogger _log;
 
         public async Task ExportPgpXmlAsync(int patientId, string identifier)
         {
+            if(_pgp == null)
+            {
+                return;
+            }
             string finalPath = Path.Combine(_outputPath, $"{_fileNameStart}_{identifier}.{_outputFileExtension}");
+
+            var pipe = new Pipe(_pipeOptions);
+            await using Stream pipeReaderStream = pipe.Reader.AsStream();
+            await using Stream pipeWriterStream = pipe.Writer.AsStream(leaveOpen: true);
 
             await using FileStream targetFileStream = new(
                 finalPath,
@@ -91,7 +104,7 @@ namespace UkrdcPgpXml
                 bufferSize: BATCH_LENGTH,
                 useAsync: true);
 
-            Task encryptionTask = _pgp.EncryptStreamAsync(_pipeReaderStream, targetFileStream);
+            Task encryptionTask = _pgp.EncryptStreamAsync(pipeReaderStream, targetFileStream);
             Exception? processingException = null;
 
             try
@@ -99,81 +112,71 @@ namespace UkrdcPgpXml
                 _patientParameter.Value = patientId;
                 using XmlReader xmlReader = await _command.ExecuteXmlReaderAsync();
 
-                XmlWriter? xmlWriter = null;
-                try
-                {
-                    xmlWriter = XmlWriter.Create(_pipeWriterStream, _xmlWriterSettings);
-                    bool isRoot = true;
+                using XmlWriter xmlWriter = XmlWriter.Create(pipeWriterStream, _xmlWriterSettings);
+                bool isRoot = true;
 
-                    while (await xmlReader.ReadAsync())
+                while (await xmlReader.ReadAsync())
+                {
+                    switch (xmlReader.NodeType)
                     {
-                        switch (xmlReader.NodeType)
-                        {
-                            case XmlNodeType.Element:
-                                if (isRoot)
-                                {
-                                    string rootLocalName = xmlReader.LocalName;
-                                    await xmlWriter.WriteStartElementAsync("ns0", rootLocalName, "http://www.rixg.org.uk");
-                                    AddAttributesFromReader(xmlReader, xmlWriter);
-                                    await xmlWriter.WriteRawAsync(_nodesToAdd);
-                                    isRoot = false;
-                                }
-                                else
-                                {
-                                    await xmlWriter.WriteStartElementAsync(xmlReader.Prefix, xmlReader.LocalName, xmlReader.NamespaceURI);
-                                    AddAttributesFromReader(xmlReader, xmlWriter);
-                                }
+                        case XmlNodeType.Element:
+                            if (isRoot)
+                            {
+                                string rootLocalName = xmlReader.LocalName;
+                                await xmlWriter.WriteStartElementAsync("ns0", rootLocalName, "http://www.rixg.org.uk");
+                                AddAttributesFromReader(xmlReader, xmlWriter);
+                                await xmlWriter.WriteRawAsync(_nodesToAdd);
+                                isRoot = false;
+                            }
+                            else
+                            {
+                                await xmlWriter.WriteStartElementAsync(xmlReader.Prefix, xmlReader.LocalName, xmlReader.NamespaceURI);
+                                AddAttributesFromReader(xmlReader, xmlWriter);
+                            }
 
-                                if (xmlReader.IsEmptyElement)
-                                {
-                                    await xmlWriter.WriteEndElementAsync();
-                                }
-                                break;
-
-                            case XmlNodeType.EndElement:
+                            if (xmlReader.IsEmptyElement)
+                            {
                                 await xmlWriter.WriteEndElementAsync();
-                                break;
+                            }
+                            break;
 
-                            case XmlNodeType.Text:
-                            case XmlNodeType.CDATA:
-                            case XmlNodeType.Comment:
-                                string value = await xmlReader.GetValueAsync();
-                                if (xmlReader.NodeType == XmlNodeType.Text) await xmlWriter.WriteStringAsync(value);
-                                else if (xmlReader.NodeType == XmlNodeType.CDATA) await xmlWriter.WriteCDataAsync(value);
-                                else await xmlWriter.WriteCommentAsync(value);
-                                break;
-                        }
+                        case XmlNodeType.EndElement:
+                            await xmlWriter.WriteEndElementAsync();
+                            break;
+
+                        case XmlNodeType.Text:
+                        case XmlNodeType.CDATA:
+                        case XmlNodeType.Comment:
+                            string value = await xmlReader.GetValueAsync();
+                            if (xmlReader.NodeType == XmlNodeType.Text) await xmlWriter.WriteStringAsync(value);
+                            else if (xmlReader.NodeType == XmlNodeType.CDATA) await xmlWriter.WriteCDataAsync(value);
+                            else await xmlWriter.WriteCommentAsync(value);
+                            break;
                     }
+                }
 
-                    //Explicitly push remaining buffer fragments to the pipe on success
-                    await xmlWriter.FlushAsync();
-                }
-                finally
-                {
-                    // Dispose local writer instance without flushing if an exception happened
-                    xmlWriter?.Dispose();
-                }
+                await xmlWriter.FlushAsync();
             }
             catch (Exception ex)
             {
                 processingException = ex;
-                _log.Error(ex, $"Error processing XML for patient {patientId} with identifier {identifier}");
+                _log.Error($"Error processing XML for patient {patientId} with identifier {identifier}: {ex.Message}");
             }
             finally
             {
                 if (processingException != null)
                 {
-                    await _pipe.Writer.CompleteAsync(processingException);
+                    await pipe.Writer.CompleteAsync(processingException);
                 }
                 else
                 {
-                    await _pipe.Writer.CompleteAsync();
+                    await pipe.Writer.CompleteAsync();
                 }
             }
 
             await encryptionTask;
-            await _pipe.Reader.CompleteAsync();
-            _pipe.Reset();
+            await pipe.Reader.CompleteAsync();
+
         }
 
         private static void AddAttributesFromReader(XmlReader reader, XmlWriter writer)
@@ -190,9 +193,7 @@ namespace UkrdcPgpXml
 
         public void Dispose()
         {
-            _pgp.Dispose();
-            _pipeReaderStream.Dispose();
-            _pipeWriterStream.Dispose();
+            _pgp?.Dispose();           
         }
     }
 }
