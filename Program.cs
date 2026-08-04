@@ -69,7 +69,7 @@ internal static class Program
 
         if (subm is null)
         {
-            Log.Error("No submission history records found for facility: {FacilityName}", sf.Name);
+            Log.Error("No submission history records found for: {FacilityName}", sf.Name);
             await Task.Delay(TIMEOUT_MS);
             await Log.CloseAndFlushAsync();
             return 1;
@@ -88,7 +88,7 @@ internal static class Program
             return 1;
         }
 
-        Log.Information("Beginning batch export processing lifecycle execution for facility: {FacilityName}", sf.Name);
+        Log.Information("Starting XML export for: {FacilityName}", sf.Name);
 
         using SqlCommand command = new(query, connection);
         command.Parameters.AddWithValue(currentSettings.SubmissionIdParameter, subm.Id);
@@ -230,8 +230,8 @@ namespace UkrdcPgpXml
         public string StartParameter { get; set; } = "@start";
         public string EndParameter { get; set; } = "@end";
         public string OutputFileExtension { get; set; } = "xml.pgp";
-        public string LogFile { get; set; } = "[path to your log directory]";
-        public int SFID { get; set; } = -1;
+        public string LogFile { get; set; } = "[path to your log files]";
+        public int SFID { get; set; } = -1;  //Sending facility. Default to an invalid ID to force user configuration
 
         public AppSettings Get(string[] args)
         {
